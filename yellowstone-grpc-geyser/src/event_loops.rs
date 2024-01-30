@@ -3,9 +3,8 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use tokio::sync::mpsc::UnboundedSender;
 use futures_util::{SinkExt, StreamExt};
 use jito_protos::{
-    bundle::BundleResult, convert::versioned_tx_from_packet, searcher::{
-        mempool_subscription, MempoolSubscription, PendingTxNotification,
-        SubscribeBundleResultsRequest, WriteLockedAccountSubscriptionV0,
+    bundle::{Bundle, BundleResult}, convert::versioned_tx_from_packet, searcher::{
+        mempool_subscription, MempoolSubscription, PendingTxNotification, ProgramSubscriptionV0, SubscribeBundleResultsRequest, WriteLockedAccountSubscriptionV0
     }
 };
 use tokio::        time::{sleep, Instant};
@@ -156,17 +155,15 @@ pub async fn pending_tx_loop(
     let mut num_pending_tx_sub_errors: usize = 0;
     let mut num_pending_tx_stream_errors: usize = 0;
     let mut num_pending_tx_stream_disconnects: usize = 0;
+    let mut slot = 0;
 
     info!("backrun pubkeys: {:?}", backrun_pubkeys);
 
     const PROCESSED_MESSAGES_MAX: usize = 31;
-    const PROCESSED_MESSAGES_SLEEP: Duration = Duration::from_millis(10);
     
     let mut messages: BTreeMap<u64, SlotMessages> = Default::default();
     let mut processed_messages = Vec::with_capacity(PROCESSED_MESSAGES_MAX);
-    let mut processed_sleep = sleep(PROCESSED_MESSAGES_SLEEP);
     let rpc = RpcClient::new("https://jarrett-solana-7ba9.mainnet.rpcpool.com/8d890735-edf2-4a75-af84-92f7c9e31718".to_string());
-    tokio::pin!(processed_sleep);
 
     loop {
         sleep(Duration::from_secs(1)).await;
@@ -176,9 +173,10 @@ pub async fn pending_tx_loop(
                 match searcher_client
                     .subscribe_mempool(MempoolSubscription {
                         regions: vec![],
-                        msg: Some(mempool_subscription::Msg::WlaV0Sub(
-                            WriteLockedAccountSubscriptionV0 {
-                                accounts: backrun_pubkeys.iter().map(|pk| pk.to_string()).collect(),
+                        msg: Some(mempool_subscription::Msg::ProgramV0Sub(
+                            
+                            ProgramSubscriptionV0 {
+                                programs: backrun_pubkeys.iter().map(|pk| pk.to_string()).collect(),
                             },
                         )),
                     })
@@ -230,9 +228,14 @@ pub async fn pending_tx_loop(
                                                 address_loader
                                             );
                                             if !sanitized_tx.is_err() {
-                                                
+                                                let maybe_slot = rpc.get_slot();
+                                                if !maybe_slot.is_err(){
+                                                    slot = maybe_slot.unwrap();
+                                                }
+
                                             let sanitized_tx = sanitized_tx.unwrap();
                                             info!("got tx: {:?}", sanitized_tx);
+                                     
                                             let message: grpc::Message = grpc::Message::Transaction(
                                                 crate::grpc::MessageTransaction {
                                                     transaction: MessageTransactionInfo {
@@ -242,7 +245,7 @@ pub async fn pending_tx_loop(
                                                         meta: TransactionStatusMeta::default(),
                                                         index
                                                     },
-                                                    slot: rpc.get_slot().unwrap(),
+                                                    slot
                                                 },
                                             );
                                             
@@ -297,9 +300,7 @@ pub async fn pending_tx_loop(
                                                                 let _ = broadcast_tx
                                                                     .send((cl2::Processed, processed_messages.into()));
                                                                 processed_messages = Vec::with_capacity(PROCESSED_MESSAGES_MAX);
-                                                                processed_sleep
-                                                                    .as_mut()
-                                                                    .reset(Instant::now() + PROCESSED_MESSAGES_SLEEP);
+                                                                
                                                             }
                                 
                                                             if !confirmed_messages.is_empty() {
@@ -321,7 +322,7 @@ pub async fn pending_tx_loop(
                                                 if !processed_messages.is_empty() {
                                                     let _ = broadcast_tx.send((cl2::Processed, processed_messages.into()));
                                                     processed_messages = Vec::with_capacity(PROCESSED_MESSAGES_MAX);
-                                                    processed_sleep.as_mut().reset(Instant::now() + PROCESSED_MESSAGES_SLEEP);
+                                                   
 
                                                 }
                                             }
